@@ -39,7 +39,6 @@ class Smartthings extends utils.Adapter {
     this.excludeDeviceSet = new Set();
     this.excludeStateEndingsArray = [];
     this.cleanStateCache = new Set();
-    this.authoritativeStates = new Set();
   }
 
   /**
@@ -471,7 +470,7 @@ class Smartthings extends utils.Adapter {
 
         const sseDevice = this.deviceArray.find((d) => d.id === de.deviceId);
         if (sseDevice && sseDevice.isTv) {
-          await this.updateCleanState(de.deviceId, payload, true);
+          await this.updateCleanState(de.deviceId, payload);
         }
       } else if (data.eventType === 'DEVICE_HEALTH_EVENT' && data.deviceHealthEvent) {
         const dhe = data.deviceHealthEvent;
@@ -820,34 +819,23 @@ class Smartthings extends utils.Adapter {
    * @param {object} statusData stripped status object { <capability>: { <attribute>: { value } } }
    * @returns {Promise<void>}
    */
-  async updateCleanState(deviceId, statusData, authoritative = false) {
+  async updateCleanState(deviceId, statusData) {
     const syncedControls = new Set(['power', 'volume', 'mute', 'input']);
     for (const entry of tvtree.deriveCleanStates(statusData)) {
       const stateId = deviceId + '.state.' + entry.path;
-      // Friendly convenience states (no dot in the path, e.g. power/volume/input) are
-      // "authoritative-driven": once an authoritative source (SSE event or a user command)
-      // has set them, stale polling values must not overwrite them. The raw scalar mirror
-      // (state.<cap>.<attr>) always follows the cloud for transparency.
-      const isConvenience = entry.path.indexOf('.') === -1;
-      if (isConvenience && !authoritative && this.authoritativeStates.has(stateId)) {
-        continue;
-      }
       if (!this.cleanStateCache.has(stateId)) {
         await this.setObjectNotExistsAsync(stateId, { type: 'state', common: entry.common, native: {} });
         this.cleanStateCache.add(stateId);
       }
-      await this.setStateAsync(stateId, entry.value, true);
-      if (isConvenience && authoritative) {
-        this.authoritativeStates.add(stateId);
-      }
+      // setStateChanged avoids re-emitting unchanged values on every poll.
+      await this.setStateChangedAsync(stateId, entry.value, true);
 
-      // Only an authoritative real-time event (SSE) updates the writable control, so a stale
-      // value coming from polling never overwrites the value the user just commanded.
-      if (authoritative && syncedControls.has(entry.path)) {
+      // Mirror the current value onto the matching read/write control so it acts as a live
+      // switch/slider. Polling is kept fresh by refreshDevice(), so this reflects reality.
+      if (syncedControls.has(entry.path)) {
         const controlId = deviceId + '.control.' + entry.path;
-        const controlObj = await this.getObjectAsync(controlId);
-        if (controlObj) {
-          await this.setStateAsync(controlId, entry.value, true);
+        if (await this.getObjectAsync(controlId)) {
+          await this.setStateChangedAsync(controlId, entry.value, true);
         }
       }
     }
@@ -907,19 +895,8 @@ class Smartthings extends utils.Adapter {
             controlData.commands[0].arguments = command.arguments;
           }
           await this.sendDeviceCommand(deviceId, controlData);
-          // Make the control "stick" at the commanded value (ack=true). Polling will not
-          // overwrite it; only an authoritative SSE event can change it afterwards.
+          // Immediate feedback; the next refreshed poll reconciles it with the real value.
           await this.setStateAsync(id, state.val, true);
-          // Optimistically reflect the command in the friendly state.* too (the cloud may keep
-          // reporting a stale value for this device), and mark it authoritative so the next
-          // poll does not revert it.
-          if (['power', 'volume', 'mute', 'input', 'app'].includes(controlId)) {
-            const convStateId = deviceId + '.state.' + controlId;
-            if (this.cleanStateCache.has(convStateId)) {
-              await this.setStateAsync(convStateId, state.val, true);
-              this.authoritativeStates.add(convStateId);
-            }
-          }
           return;
         }
 
