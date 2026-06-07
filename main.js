@@ -439,9 +439,25 @@ class Smartthings extends utils.Adapter {
           const de = data.deviceEvent;
           this.log.debug(`Device event: ${de.deviceId} ${de.capability}.${de.attribute} = ${de.value}`);
 
-          // Update state directly from SSE event (real-time update)
-          const statePath = `${de.deviceId}.status.components.main.${de.capability}.${de.attribute}.value`;
+          // Update state directly from SSE event (real-time update).
+          // Use the same tree the poller writes to (status.<capability>.<attribute>.value),
+          // not status.components.main.*, otherwise SSE updates land in an orphan tree that
+          // nobody reads and setState warns with "has no existing object".
+          const statePath = `${de.deviceId}.status.${de.capability}.${de.attribute}.value`;
           if (de.stateChange) {
+            // Ensure the object exists before setState to avoid "has no existing object"
+            // warnings when an SSE event arrives before the poller created the state.
+            await this.setObjectNotExistsAsync(statePath, {
+              type: 'state',
+              common: {
+                name: de.attribute,
+                type: de.value === null ? 'mixed' : typeof de.value,
+                role: 'state',
+                read: true,
+                write: false,
+              },
+              native: {},
+            });
             await this.setStateAsync(statePath, de.value, true);
             this.log.debug(`Updated state via SSE: ${statePath} = ${de.value}`);
           }
