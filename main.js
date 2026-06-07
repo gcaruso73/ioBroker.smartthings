@@ -470,7 +470,7 @@ class Smartthings extends utils.Adapter {
 
         const sseDevice = this.deviceArray.find((d) => d.id === de.deviceId);
         if (sseDevice && sseDevice.isTv) {
-          await this.updateCleanState(de.deviceId, payload);
+          await this.updateCleanState(de.deviceId, payload, true);
         }
       } else if (data.eventType === 'DEVICE_HEALTH_EVENT' && data.deviceHealthEvent) {
         const dhe = data.deviceHealthEvent;
@@ -795,7 +795,7 @@ class Smartthings extends utils.Adapter {
    * @param {object} statusData stripped status object { <capability>: { <attribute>: { value } } }
    * @returns {Promise<void>}
    */
-  async updateCleanState(deviceId, statusData) {
+  async updateCleanState(deviceId, statusData, syncControls = false) {
     const syncedControls = new Set(['power', 'volume', 'mute', 'input']);
     for (const entry of tvtree.deriveCleanStates(statusData)) {
       const stateId = deviceId + '.state.' + entry.path;
@@ -805,8 +805,11 @@ class Smartthings extends utils.Adapter {
       }
       await this.setStateAsync(stateId, entry.value, true);
 
-      // Reflect the current value on the matching writable control (ack=true => no command).
-      if (syncedControls.has(entry.path)) {
+      // Only an authoritative real-time event (SSE) updates the writable control, so a stale
+      // value coming from polling never overwrites the value the user just commanded. (Some
+      // devices, e.g. Samsung TVs for audioVolume, never report the real value back to the
+      // cloud, so the polled value can stay stale - state.* still reflects it for transparency.)
+      if (syncControls && syncedControls.has(entry.path)) {
         const controlId = deviceId + '.control.' + entry.path;
         const controlObj = await this.getObjectAsync(controlId);
         if (controlObj) {
@@ -870,6 +873,9 @@ class Smartthings extends utils.Adapter {
             controlData.commands[0].arguments = command.arguments;
           }
           await this.sendDeviceCommand(deviceId, controlData);
+          // Make the control "stick" at the commanded value (ack=true). Polling will not
+          // overwrite it; only an authoritative SSE event can change it afterwards.
+          await this.setStateAsync(id, state.val, true);
           return;
         }
 
