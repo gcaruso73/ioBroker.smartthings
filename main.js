@@ -430,49 +430,48 @@ class Smartthings extends utils.Adapter {
       this.log.error('Error with SSE connection: ' + JSON.stringify(err));
     };
 
-    es.onmessage = async (event) => {
+    es.onmessage = (event) => {
       this.log.debug('Received SSE event: ' + event.data);
-      try {
-        const data = JSON.parse(event.data);
-        // APK uses eventType field, not event
-        if (data.eventType === 'DEVICE_EVENT' && data.deviceEvent) {
-          const de = data.deviceEvent;
-          this.log.debug(`Device event: ${de.deviceId} ${de.capability}.${de.attribute} = ${de.value}`);
-
-          // Update state directly from SSE event (real-time update).
-          // Use the same tree the poller writes to (status.<capability>.<attribute>.value),
-          // not status.components.main.*, otherwise SSE updates land in an orphan tree that
-          // nobody reads and setState warns with "has no existing object".
-          const statePath = `${de.deviceId}.status.${de.capability}.${de.attribute}.value`;
-          if (de.stateChange) {
-            // Ensure the object exists before setState to avoid "has no existing object"
-            // warnings when an SSE event arrives before the poller created the state.
-            await this.setObjectNotExistsAsync(statePath, {
-              type: 'state',
-              common: {
-                name: de.attribute,
-                type: de.value === null ? 'mixed' : typeof de.value,
-                role: 'state',
-                read: true,
-                write: false,
-              },
-              native: {},
-            });
-            await this.setStateAsync(statePath, de.value, true);
-            this.log.debug(`Updated state via SSE: ${statePath} = ${de.value}`);
-          }
-        } else if (data.eventType === 'DEVICE_HEALTH_EVENT' && data.deviceHealthEvent) {
-          const dhe = data.deviceHealthEvent;
-          this.log.debug(`Device health: ${dhe.deviceId} = ${dhe.status}`);
-        }
-      } catch (error) {
-        this.log.error('Error parsing SSE event data: ' + error);
-      }
+      this._handleSseEvent(event.data);
     };
 
+    // SmartThings delivers events as *named* SSE frames (event: DEVICE_EVENT), so es.onmessage
+    // (which only fires for unnamed "message" frames) never runs. The real-time state update
+    // therefore has to happen here, where the events actually arrive.
     es.addEventListener('DEVICE_EVENT', (event) => {
       this.log.debug('Device event received via addEventListener: ' + event.data);
+      this._handleSseEvent(event.data);
     });
+  }
+
+  /**
+   * Parse a raw SmartThings SSE payload and mirror device events into the status tree.
+   * The value is written through the same json2iob path the poller uses
+   * (status.<capability>.<attribute>.value), so SSE and poll updates stay consistent,
+   * complex (object/array) values are exploded the same way, and any missing objects are
+   * created by json2iob (avoiding "has no existing object" warnings).
+   * @param {string} rawData - The raw event.data string from the SSE stream.
+   * @returns {Promise<void>}
+   */
+  async _handleSseEvent(rawData) {
+    try {
+      const data = JSON.parse(rawData);
+      if (data.eventType === 'DEVICE_EVENT' && data.deviceEvent) {
+        const de = data.deviceEvent;
+        if (!de.stateChange) {
+          return;
+        }
+        this.log.debug(`Device event: ${de.deviceId} ${de.capability}.${de.attribute} = ${JSON.stringify(de.value)}`);
+        const payload = { [de.capability]: { [de.attribute]: { value: de.value } } };
+        await this.json2iob.parse(`${de.deviceId}.status`, payload, { channelName: 'Status of the device' });
+        this.log.debug(`Updated state via SSE: ${de.deviceId}.status.${de.capability}.${de.attribute}.value`);
+      } else if (data.eventType === 'DEVICE_HEALTH_EVENT' && data.deviceHealthEvent) {
+        const dhe = data.deviceHealthEvent;
+        this.log.debug(`Device health: ${dhe.deviceId} = ${dhe.status}`);
+      }
+    } catch (error) {
+      this.log.error('Error parsing SSE event data: ' + error);
+    }
   }
   async refreshToken() {
     if (!this.session.refresh_token) {
