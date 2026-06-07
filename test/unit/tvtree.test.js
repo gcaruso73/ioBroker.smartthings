@@ -106,4 +106,12 @@ describe('tvtree.deriveCleanStates', () => {
   it('returns [] for malformed input', () => {
     assert.deepStrictEqual(tvtree.deriveCleanStates(null), []);
   });
+  it('prefers samsungvd.mediaInputSource over the standard (stale) one for input', () => {
+    const s = {
+      mediaInputSource: { inputSource: { value: 'digitalTv' } },
+      'samsungvd.mediaInputSource': { inputSource: { value: 'HDMI2' } },
+    };
+    const map = Object.fromEntries(tvtree.deriveCleanStates(s).map((e) => [e.path, e.value]));
+    assert.strictEqual(map['input'], 'HDMI2');
+  });
 });
