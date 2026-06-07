@@ -56,12 +56,12 @@ describe('tvtree.mapControlCommand', () => {
     assert.deepStrictEqual(tvtree.mapControlCommand('mute', true, caps), { capability: 'audioMute', command: 'mute' });
     assert.deepStrictEqual(tvtree.mapControlCommand('mute', false, caps), { capability: 'audioMute', command: 'unmute' });
   });
-  it('prefers standard mediaInputSource for input', () => {
+  it('uses standard mediaInputSource when the vendor capability is absent', () => {
     assert.deepStrictEqual(tvtree.mapControlCommand('input', 'HDMI1', caps), { capability: 'mediaInputSource', command: 'setInputSource', arguments: ['HDMI1'] });
   });
-  it('falls back to samsungvd.mediaInputSource when standard is absent', () => {
-    const vcaps = new Set(['samsungvd.mediaInputSource']);
-    assert.deepStrictEqual(tvtree.mapControlCommand('input', 'HDMI2', vcaps), { capability: 'samsungvd.mediaInputSource', command: 'setInputSource', arguments: ['HDMI2'] });
+  it('prefers samsungvd.mediaInputSource when present (only that one accepts setInputSource on Samsung TVs)', () => {
+    const both = new Set(['mediaInputSource', 'samsungvd.mediaInputSource']);
+    assert.deepStrictEqual(tvtree.mapControlCommand('input', 'HDMI2', both), { capability: 'samsungvd.mediaInputSource', command: 'setInputSource', arguments: ['HDMI2'] });
   });
   it('maps remote to samsungvd.remoteControl send', () => {
     assert.deepStrictEqual(tvtree.mapControlCommand('remote', 'OK', caps), { capability: 'samsungvd.remoteControl', command: 'send', arguments: ['OK'] });
