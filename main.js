@@ -554,13 +554,6 @@ class Smartthings extends utils.Adapter {
             },
             native: {},
           });
-          await this.setObjectNotExistsAsync(device.deviceId + '.capabilities', {
-            type: 'channel',
-            common: {
-              name: 'Capabilities/Remote Controls',
-            },
-            native: {},
-          });
           await this.setObjectNotExistsAsync(device.deviceId + '.general', {
             type: 'channel',
             common: {
@@ -568,13 +561,16 @@ class Smartthings extends utils.Adapter {
             },
             native: {},
           });
+          // Clean, complete command tree (replaces the legacy cryptic `capabilities.*`).
+          await this.setObjectNotExistsAsync(device.deviceId + '.control', {
+            type: 'channel',
+            common: { name: 'Control (send commands here)' },
+            native: {},
+          });
+          // Drop the legacy capabilities.* tree created by earlier versions.
+          await this.delObjectAsync(device.deviceId + '.capabilities', { recursive: true }).catch(() => {});
 
           if (isTv) {
-            await this.setObjectNotExistsAsync(device.deviceId + '.control', {
-              type: 'channel',
-              common: { name: 'Control (send commands here)' },
-              native: {},
-            });
             await this.setObjectNotExistsAsync(device.deviceId + '.state', {
               type: 'channel',
               common: { name: 'State (current values)' },
@@ -603,36 +599,26 @@ class Smartthings extends utils.Adapter {
                 .then(async (res) => {
                   this.log.debug(JSON.stringify(res.data));
                   const idName = res.data.id;
-                  Object.keys(res.data.commands).forEach(async (element) => {
-                    const common = {
-                      name: '',
-                      type: 'boolean',
-                      role: 'boolean',
-                      write: true,
-                      read: true,
-                    };
-                    const letsubIdName = idName + '-' + element;
-
-                    let commandCreated = false;
+                  for (const element of Object.keys(res.data.commands)) {
+                    // OCF: expand the device-specific OCF commands into control.ocf.<name>.
                     if (idName === 'ocf' && element === 'postOcfCommand') {
                       const ocfDevice = this.ocfDeviceFactory.getOcfDevice(device.deviceManufacturerCode, device.presentationId);
                       if (ocfDevice) {
                         const ocfDeviceCommands = ocfDevice.getOcfCommands();
                         for (const ocfDeviceCommandName in ocfDeviceCommands) {
                           const ocfDeviceCommand = ocfDeviceCommands[ocfDeviceCommandName];
-
-                          const objectRaw = {
+                          await this.setObjectNotExistsAsync(device.deviceId + '.control.ocf.' + ocfDeviceCommandName, {
                             type: 'state',
                             common: {
-                              name: '',
+                              name: ocfDeviceCommandName,
                               type: ocfDeviceCommand.iobroker ? ocfDeviceCommand.iobroker.type : ocfDeviceCommand.type,
-                              role: ocfDeviceCommand.iobroker ? ocfDeviceCommand.iobroker.type : ocfDeviceCommand.type,
+                              role: 'text',
                               min: ocfDeviceCommand.iobroker && ocfDeviceCommand.iobroker.min ? ocfDeviceCommand.iobroker.min : 0,
                               max: ocfDeviceCommand.iobroker && ocfDeviceCommand.iobroker.max ? ocfDeviceCommand.iobroker.max : 0,
                               states:
                                 ocfDeviceCommand.iobroker && ocfDeviceCommand.iobroker.states ? ocfDeviceCommand.iobroker.states : null,
                               write: true,
-                              read: true,
+                              read: false,
                             },
                             native: {
                               type: 'OcfCommand',
@@ -641,37 +627,19 @@ class Smartthings extends utils.Adapter {
                               deviceId: device.deviceId,
                               commandName: ocfDeviceCommandName,
                             },
-                          };
-                          await this.setObjectNotExistsAsync(
-                            device.deviceId + '.capabilities.' + letsubIdName + '.' + ocfDeviceCommandName,
-                            objectRaw,
-                          );
-                        }
-                        commandCreated = true;
-                      }
-                    }
-
-                    if (!commandCreated) {
-                      if (res.data.commands[element].arguments[0]) {
-                        common.type = res.data.commands[element].arguments[0].schema.type;
-                        if (common.type === 'integer') {
-                          common.type = 'number';
-                        }
-                        common.role = 'state';
-                        if (res.data.commands[element].arguments[0].schema.enum) {
-                          common.states = {};
-                          res.data.commands[element].arguments[0].schema.enum.forEach((enumElement) => {
-                            common.states[enumElement] = enumElement;
                           });
                         }
                       }
-                      await this.setObjectNotExistsAsync(device.deviceId + '.capabilities.' + letsubIdName, {
-                        type: 'state',
-                        common: common,
-                        native: {},
-                      });
+                      continue;
                     }
-                  });
+                    // Generic: control.<capability>.<attribute|command>, dispatched via native.
+                    const spec = tvtree.commandToControl(idName, element, res.data.commands[element]);
+                    await this.setObjectNotExistsAsync(device.deviceId + '.control.' + spec.path, {
+                      type: 'state',
+                      common: spec.common,
+                      native: spec.native,
+                    });
+                  }
                 })
                 .catch((error) => {
                   this.log.error(error);
@@ -881,75 +849,47 @@ class Smartthings extends utils.Adapter {
       if (!state.ack) {
         const idArray = id.split('.');
         const deviceId = idArray[2];
-
-        if (idArray[3] === 'control') {
-          const controlId = idArray.slice(4).join('.');
-          const device = this.deviceArray.find((d) => d.id === deviceId);
-          const command = tvtree.mapControlCommand(controlId, state.val, device && device.caps);
-          if (!command) {
-            this.log.warn('Unknown control state: ' + id);
-            return;
-          }
-          const controlData = { commands: [{ capability: command.capability, command: command.command }] };
-          if (command.arguments) {
-            controlData.commands[0].arguments = command.arguments;
-          }
-          await this.sendDeviceCommand(deviceId, controlData);
-          // Immediate feedback; the next refreshed poll reconciles it with the real value.
-          await this.setStateAsync(id, state.val, true);
+        // Only the control.* tree sends commands; everything else is read-only.
+        if (idArray[3] !== 'control') {
           return;
         }
+        const controlId = idArray.slice(4).join('.');
+        const device = this.deviceArray.find((d) => d.id === deviceId);
 
-        idArray.splice(0, 4);
-        let capadId = idArray.join('.');
-        const commandId = capadId.split('-')[1];
-        capadId = capadId.split('-')[0];
-
-        let data = { commands: [{ capability: capadId, command: commandId }] };
-        if (typeof state.val !== 'boolean') {
-          data.commands[0].arguments = [state.val];
-        }
-
-        if (capadId === 'ocf' && commandId.startsWith('postOcfCommand')) {
-          const commandObject = await this.getForeignObjectAsync(id).then((result) => result);
-          if (commandObject) {
-            const candidate = this.ocfDeviceFactory.getOcfCommandData(
-              commandObject.native.deviceManufacturerCode,
-              commandObject.native.presentationId,
-              commandObject.native.deviceId,
-              commandObject.native.commandName,
+        let data = null;
+        // 1) Friendly consolidated shortcuts (power, volume, mute, input, channel, ...).
+        const friendly = tvtree.mapControlCommand(controlId, state.val, device && device.caps);
+        if (friendly) {
+          data = { commands: [{ capability: friendly.capability, command: friendly.command }] };
+          if (friendly.arguments) {
+            data.commands[0].arguments = friendly.arguments;
+          }
+        } else {
+          // 2) Generic controls: the command is described in the object's native.
+          const obj = await this.getObjectAsync(id);
+          if (obj && obj.native && obj.native.type === 'OcfCommand') {
+            data = this.ocfDeviceFactory.getOcfCommandData(
+              obj.native.deviceManufacturerCode,
+              obj.native.presentationId,
+              obj.native.deviceId,
+              obj.native.commandName,
               state.val,
             );
-            if (candidate !== null) {
-              data = candidate;
+          } else if (obj && obj.native && obj.native.capability && obj.native.command) {
+            data = { commands: [{ capability: obj.native.capability, command: obj.native.command }] };
+            if (obj.native.hasArg) {
+              data.commands[0].arguments = [state.val];
             }
           }
         }
 
-        this.log.info(JSON.stringify(data));
-        await this.requestClient({
-          method: 'post',
-          url: 'https://api.smartthings.com/v1/devices/' + deviceId + '/commands',
-          headers: {
-            'User-Agent': 'ioBroker',
-            Authorization: 'Bearer ' + this.config.token,
-          },
-          data: data,
-        })
-          .then((res) => {
-            this.log.info(JSON.stringify(res.data));
-            return res.data;
-          })
-          .catch((error) => {
-            this.log.error(error);
-            if (error.response) {
-              this.log.error(JSON.stringify(error.response.data));
-            }
-          });
-        clearTimeout(this.refreshTimeout);
-        this.refreshTimeout = setTimeout(async () => {
-          await this.updateDevices();
-        }, 10 * 1000);
+        if (!data) {
+          this.log.warn('Unknown or non-commandable control state: ' + id);
+          return;
+        }
+        await this.sendDeviceCommand(deviceId, data);
+        // Immediate feedback; the next refreshed poll reconciles it with the real value.
+        await this.setStateAsync(id, state.val, true);
       }
     }
   }

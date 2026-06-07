@@ -74,6 +74,40 @@ describe('tvtree.mapControlCommand', () => {
   });
 });
 
+describe('tvtree.setterAttribute', () => {
+  it('extracts the attribute from a setter command', () => {
+    assert.strictEqual(tvtree.setterAttribute('setVolume'), 'volume');
+    assert.strictEqual(tvtree.setterAttribute('setInputSource'), 'inputSource');
+  });
+  it('returns null for non-setter commands', () => {
+    assert.strictEqual(tvtree.setterAttribute('volumeUp'), null);
+    assert.strictEqual(tvtree.setterAttribute('refresh'), null);
+  });
+});
+
+describe('tvtree.commandToControl', () => {
+  it('maps an argument-less command to a button', () => {
+    const c = tvtree.commandToControl('audioVolume', 'volumeUp', {});
+    assert.strictEqual(c.path, 'audioVolume.volumeUp');
+    assert.strictEqual(c.common.role, 'button');
+    assert.strictEqual(c.common.type, 'boolean');
+    assert.deepStrictEqual(c.native, { capability: 'audioVolume', command: 'volumeUp', hasArg: false });
+  });
+  it('maps a numeric setter to control.<cap>.<attr> with min/max', () => {
+    const c = tvtree.commandToControl('audioVolume', 'setVolume', { arguments: [{ schema: { type: 'integer', minimum: 0, maximum: 100 } }] });
+    assert.strictEqual(c.path, 'audioVolume.volume');
+    assert.strictEqual(c.common.type, 'number');
+    assert.strictEqual(c.common.min, 0);
+    assert.strictEqual(c.common.max, 100);
+    assert.deepStrictEqual(c.native, { capability: 'audioVolume', command: 'setVolume', hasArg: true });
+  });
+  it('maps an enum setter to states', () => {
+    const c = tvtree.commandToControl('custom.picturemode', 'setPictureMode', { arguments: [{ schema: { type: 'string', enum: ['Standard', 'Film'] } }] });
+    assert.strictEqual(c.path, 'custom.picturemode.pictureMode');
+    assert.deepStrictEqual(c.common.states, { Standard: 'Standard', Film: 'Film' });
+  });
+});
+
 describe('tvtree channel state/control wiring', () => {
   it('builds a channel control when tvChannel is present', () => {
     const ids = tvtree.buildControlObjects(new Set(['tvChannel'])).map((c) => c.id);
