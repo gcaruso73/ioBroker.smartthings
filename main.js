@@ -10,6 +10,7 @@ const utils = require('@iobroker/adapter-core');
 const axios = require('axios').default;
 const Json2iob = require('json2iob');
 const OcfDeviceFactory = require('./lib/ocf/ocfDeviceFactory');
+const tvtree = require('./lib/tvtree');
 const crypto = require('crypto');
 const qs = require('qs');
 const { EventSource } = require('eventsource');
@@ -37,6 +38,7 @@ class Smartthings extends utils.Adapter {
     this.responseCache = {};
     this.excludeDeviceSet = new Set();
     this.excludeStateEndingsArray = [];
+    this.cleanStateCache = new Set();
   }
 
   /**
@@ -465,6 +467,11 @@ class Smartthings extends utils.Adapter {
         const payload = { [de.capability]: { [de.attribute]: { value: de.value } } };
         await this.json2iob.parse(`${de.deviceId}.status`, payload, { channelName: 'Status of the device' });
         this.log.debug(`Updated state via SSE: ${de.deviceId}.status.${de.capability}.${de.attribute}.value`);
+
+        const sseDevice = this.deviceArray.find((d) => d.id === de.deviceId);
+        if (sseDevice && sseDevice.isTv) {
+          await this.updateCleanState(de.deviceId, payload);
+        }
       } else if (data.eventType === 'DEVICE_HEALTH_EVENT' && data.deviceHealthEvent) {
         const dhe = data.deviceHealthEvent;
         this.log.debug(`Device health: ${dhe.deviceId} = ${dhe.status}`);
@@ -537,7 +544,9 @@ class Smartthings extends utils.Adapter {
             this.log.info('Ignore ' + device.deviceId);
             continue;
           }
-          this.deviceArray.push({ id: device.deviceId, type: device.deviceTypeName });
+          const isTv = tvtree.isTvDevice(device);
+          const capabilitySet = tvtree.getCapabilitySet(device);
+          this.deviceArray.push({ id: device.deviceId, type: device.deviceTypeName, isTv, caps: capabilitySet });
           await this.setObjectNotExistsAsync(device.deviceId, {
             type: 'device',
             common: {
@@ -559,6 +568,26 @@ class Smartthings extends utils.Adapter {
             },
             native: {},
           });
+
+          if (isTv) {
+            await this.setObjectNotExistsAsync(device.deviceId + '.control', {
+              type: 'channel',
+              common: { name: 'Control (send commands here)' },
+              native: {},
+            });
+            await this.setObjectNotExistsAsync(device.deviceId + '.state', {
+              type: 'channel',
+              common: { name: 'State (current values)' },
+              native: {},
+            });
+            for (const ctrl of tvtree.buildControlObjects(capabilitySet)) {
+              await this.setObjectNotExistsAsync(device.deviceId + '.control.' + ctrl.id, {
+                type: 'state',
+                common: ctrl.common,
+                native: {},
+              });
+            }
+          }
 
           // const remoteArray = [];
           if (device.components && device.components[0] && device.components[0].capabilities) {
@@ -714,6 +743,10 @@ class Smartthings extends utils.Adapter {
           });
 
           this.responseCache[cacheKey] = data;
+
+          if (device.isTv) {
+            await this.updateCleanState(device.id, data);
+          }
         } catch (error) {
           if (error.response && error.response.status === 401) {
             error.response && this.log.debug(JSON.stringify(error.response.data));
@@ -755,6 +788,65 @@ class Smartthings extends utils.Adapter {
   }
 
   /**
+   * Mirror the current scalar values of a TV into the clean state.* tree, and keep the
+   * read/write control.* states in sync with the current value (ack'd, so it does not
+   * re-trigger a command).
+   * @param {string} deviceId
+   * @param {object} statusData stripped status object { <capability>: { <attribute>: { value } } }
+   * @returns {Promise<void>}
+   */
+  async updateCleanState(deviceId, statusData) {
+    const syncedControls = new Set(['power', 'volume', 'mute', 'input']);
+    for (const entry of tvtree.deriveCleanStates(statusData)) {
+      const stateId = deviceId + '.state.' + entry.path;
+      if (!this.cleanStateCache.has(stateId)) {
+        await this.setObjectNotExistsAsync(stateId, { type: 'state', common: entry.common, native: {} });
+        this.cleanStateCache.add(stateId);
+      }
+      await this.setStateAsync(stateId, entry.value, true);
+
+      // Reflect the current value on the matching writable control (ack=true => no command).
+      if (syncedControls.has(entry.path)) {
+        const controlId = deviceId + '.control.' + entry.path;
+        const controlObj = await this.getObjectAsync(controlId);
+        if (controlObj) {
+          await this.setStateAsync(controlId, entry.value, true);
+        }
+      }
+    }
+  }
+
+  /**
+   * POST a command payload to a device and schedule a refresh.
+   * @param {string} deviceId
+   * @param {{commands:Array<object>}} data
+   * @returns {Promise<void>}
+   */
+  async sendDeviceCommand(deviceId, data) {
+    this.log.info(JSON.stringify(data));
+    await this.requestClient({
+      method: 'post',
+      url: 'https://api.smartthings.com/v1/devices/' + deviceId + '/commands',
+      headers: { 'User-Agent': 'ioBroker', Authorization: 'Bearer ' + this.config.token },
+      data: data,
+    })
+      .then((res) => {
+        this.log.info(JSON.stringify(res.data));
+        return res.data;
+      })
+      .catch((error) => {
+        this.log.error(error);
+        if (error.response) {
+          this.log.error(JSON.stringify(error.response.data));
+        }
+      });
+    clearTimeout(this.refreshTimeout);
+    this.refreshTimeout = setTimeout(async () => {
+      await this.updateDevices();
+    }, 10 * 1000);
+  }
+
+  /**
    * Is called if a subscribed state changes
    * @param {string} id
    * @param {ioBroker.State | null | undefined} state
@@ -764,6 +856,23 @@ class Smartthings extends utils.Adapter {
       if (!state.ack) {
         const idArray = id.split('.');
         const deviceId = idArray[2];
+
+        if (idArray[3] === 'control') {
+          const controlId = idArray.slice(4).join('.');
+          const device = this.deviceArray.find((d) => d.id === deviceId);
+          const command = tvtree.mapControlCommand(controlId, state.val, device && device.caps);
+          if (!command) {
+            this.log.warn('Unknown control state: ' + id);
+            return;
+          }
+          const controlData = { commands: [{ capability: command.capability, command: command.command }] };
+          if (command.arguments) {
+            controlData.commands[0].arguments = command.arguments;
+          }
+          await this.sendDeviceCommand(deviceId, controlData);
+          return;
+        }
+
         idArray.splice(0, 4);
         let capadId = idArray.join('.');
         const commandId = capadId.split('-')[1];
