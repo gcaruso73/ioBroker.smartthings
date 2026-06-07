@@ -820,7 +820,7 @@ class Smartthings extends utils.Adapter {
    * @returns {Promise<void>}
    */
   async updateCleanState(deviceId, statusData) {
-    const syncedControls = new Set(['power', 'volume', 'mute', 'input']);
+    const syncedControls = new Set(['power', 'volume', 'mute', 'input', 'channel']);
     for (const entry of tvtree.deriveCleanStates(statusData)) {
       const stateId = deviceId + '.state.' + entry.path;
       if (!this.cleanStateCache.has(stateId)) {

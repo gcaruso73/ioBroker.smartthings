@@ -66,8 +66,24 @@ describe('tvtree.mapControlCommand', () => {
   it('maps remote to samsungvd.remoteControl send', () => {
     assert.deepStrictEqual(tvtree.mapControlCommand('remote', 'OK', caps), { capability: 'samsungvd.remoteControl', command: 'send', arguments: ['OK'] });
   });
+  it('maps channel to tvChannel setTvChannel with a string argument', () => {
+    assert.deepStrictEqual(tvtree.mapControlCommand('channel', 10, caps), { capability: 'tvChannel', command: 'setTvChannel', arguments: ['10'] });
+  });
   it('returns null for unknown control', () => {
     assert.strictEqual(tvtree.mapControlCommand('nope', 1, caps), null);
+  });
+});
+
+describe('tvtree channel state/control wiring', () => {
+  it('builds a channel control when tvChannel is present', () => {
+    const ids = tvtree.buildControlObjects(new Set(['tvChannel'])).map((c) => c.id);
+    assert.ok(ids.includes('channel'));
+    assert.ok(ids.includes('channelUp'));
+  });
+  it('derives a channel convenience state from tvChannel.tvChannel', () => {
+    const s = { tvChannel: { tvChannel: { value: 101 } } };
+    const map = Object.fromEntries(tvtree.deriveCleanStates(s).map((e) => [e.path, e.value]));
+    assert.strictEqual(map['channel'], '101');
   });
 });
 
