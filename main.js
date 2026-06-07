@@ -706,6 +706,10 @@ class Smartthings extends utils.Adapter {
       if (onlyVirtualSwitch && device.type !== 'Virtual Switch') {
         continue;
       }
+      // Force the cloud to re-query the device first, otherwise /status can be stale.
+      if (device.caps && device.caps.has('refresh')) {
+        await this.refreshDevice(device.id);
+      }
       for (const element of statusArray) {
         const url = element.url.replace('$id', device.id);
 
@@ -785,6 +789,26 @@ class Smartthings extends utils.Adapter {
     } catch (e) {
       this.log.error(e);
       callback();
+    }
+  }
+
+  /**
+   * Ask the SmartThings cloud to re-query the device (the `refresh` capability). Without this
+   * the cloud /status can return stale values for some devices (e.g. Samsung TVs only report
+   * fresh state after a refresh). Fire-and-forget; errors are non-fatal.
+   * @param {string} deviceId
+   * @returns {Promise<void>}
+   */
+  async refreshDevice(deviceId) {
+    try {
+      await this.requestClient({
+        method: 'post',
+        url: 'https://api.smartthings.com/v1/devices/' + deviceId + '/commands',
+        headers: { 'User-Agent': 'ioBroker', Authorization: 'Bearer ' + this.config.token },
+        data: { commands: [{ capability: 'refresh', command: 'refresh' }] },
+      });
+    } catch (error) {
+      this.log.debug('Refresh failed for ' + deviceId + ': ' + error);
     }
   }
 
